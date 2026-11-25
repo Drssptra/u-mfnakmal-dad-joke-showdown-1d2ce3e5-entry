@@ -1,85 +1,131 @@
 // SPDX-License-Identifier: MIT
-// Dad Joke Showdown — one fixed entry line, written to /output/entry.txt.
 //
-// The entry is a single fixed joke string. Before writing it out we run it
-// through validateEntry(), which enforces the competition's entry rules so
-// a bad entry fails loudly instead of being submitted silently.
+// Dad Joke Showdown — v2 resubmission.
+//
+// The program produces exactly one artifact: the fixed joke below, written
+// byte-for-byte to $MAKEFUN_OUTPUT_DIR/entry.txt. There is no trailing
+// newline, no extra file, and nothing else on disk. Everything in this
+// file exists to make sure the joke that gets written is the joke we
+// intended: one line, within the length limit, free of stray whitespace
+// or control characters, and different from the v1 pencil joke.
+
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ENTRY =
+// The entry itself. Do not edit this string: the competition judges the
+// exact text, punctuation included.
+const JOKE =
+  "My wife asked why I keep a ladder in the garage. I said in case I ever need to take things to the next level.";
+
+// The v1 entry. This file must never emit it again; the check in main()
+// exists so a bad merge can only fail, never silently resubmit v1.
+const PREVIOUS_JOKE =
   "My son asked why I keep a pencil behind my ear. I said it's in case I need to draw the line somewhere.";
 
-// Competition limits for a showdown entry.
-const MIN_LENGTH = 1;
-const MAX_LENGTH = 200;
+// Competition bounds for one entry line.
+const LIMITS = { minChars: 1, maxChars: 200 } as const;
 
-// Characters that are never allowed inside an entry: newlines, carriage
-// returns, tabs, and any other control character (U+0000–U+001F, U+007F).
-const CONTROL_CHAR = /[\u0000-\u001F\u007F]/;
+// Fallback used only when the runner did not set MAKEFUN_OUTPUT_DIR.
+const DEFAULT_OUTPUT_DIR = "/output";
 
-// True when the string contains at least one letter or digit — i.e. it is
-// more than just punctuation and whitespace.
-function hasAlphanumeric(entry: string): boolean {
-  return /[\p{L}\p{N}]/u.test(entry);
+// Every problem found with a candidate entry, in one place, so a failure
+// message lists all of them instead of stopping at the first one.
+interface EntryProblems {
+  tooShort: boolean;
+  tooLong: boolean;
+  blank: boolean;
+  hasLeadingSpace: boolean;
+  hasTrailingSpace: boolean;
+  hasLineBreak: boolean;
+  hasControlChar: boolean;
+  hasNoLettersOrDigits: boolean;
 }
 
-// A single entry rule: a human-readable name plus the test itself. When a
-// rule fails, validateEntry reports the rule's name so the exact broken
-// rule is obvious from the error message.
-type EntryRule = { name: string; passes: (entry: string) => boolean };
+// One left-to-right scan of the entry. Counting code points (not UTF-16
+// code units) keeps the length honest for any non-ASCII text, and walking
+// the string once means every check below shares the same pass.
+function scanEntry(text: string): EntryProblems {
+  let charCount = 0;
+  let seenLetterOrDigit = false;
+  let seenControlChar = false;
+  let seenLineBreak = false;
 
-function buildRules(): EntryRule[] {
-  return [
-    {
-      name: "length",
-      passes: (entry) => {
-        const count = [...entry].length;
-        return count >= MIN_LENGTH && count <= MAX_LENGTH;
-      },
-    },
-    {
-      name: "not-blank",
-      passes: (entry) => entry.trim().length > 0,
-    },
-    {
-      name: "no-leading-or-trailing-whitespace",
-      passes: (entry) => entry === entry.trim(),
-    },
-    {
-      name: "single-line",
-      passes: (entry) => !entry.includes("\n") && !entry.includes("\r"),
-    },
-    {
-      name: "no-control-characters",
-      passes: (entry) => !CONTROL_CHAR.test(entry),
-    },
-    {
-      name: "not-only-punctuation",
-      passes: (entry) => hasAlphanumeric(entry),
-    },
-  ];
-}
-
-// Validate the entry against every rule. Throws an Error naming the exact
-// rule that failed and the entry length; returns nothing when valid.
-function validateEntry(entry: string): void {
-  const length = [...entry].length;
-  for (const rule of buildRules()) {
-    if (!rule.passes(entry)) {
-      throw new Error(
-        `entry failed rule "${rule.name}" ` +
-          `(entry is ${length} code points; ` +
-          `must be ${MIN_LENGTH}-${MAX_LENGTH} chars, one line, ` +
-          `no leading/trailing whitespace, no control characters, ` +
-          `and contain at least one letter or digit)`,
-      );
+  for (const ch of text) {
+    charCount += 1;
+    const code = ch.codePointAt(0) as number;
+    if (code === 0x0a || code === 0x0d) {
+      seenLineBreak = true;
+    } else if (code < 0x20 || code === 0x7f) {
+      seenControlChar = true;
+    }
+    // ASCII letters/digits plus any Unicode letter/number. A cheap ASCII
+    // test first; the regex only runs for the rare non-ASCII character.
+    if (
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      /[\p{L}\p{N}]/u.test(ch)
+    ) {
+      seenLetterOrDigit = true;
     }
   }
+
+  return {
+    tooShort: charCount < LIMITS.minChars,
+    tooLong: charCount > LIMITS.maxChars,
+    blank: text.trim().length === 0,
+    hasLeadingSpace: text.trimStart().length !== text.length,
+    hasTrailingSpace: text.trimEnd().length !== text.length,
+    hasLineBreak: seenLineBreak,
+    hasControlChar: seenControlChar,
+    hasNoLettersOrDigits: !seenLetterOrDigit,
+  };
 }
 
-validateEntry(ENTRY);
+// Turn the scan result into a readable list of failures. Empty means the
+// entry is good to write.
+function describeProblems(p: EntryProblems): string[] {
+  const found: string[] = [];
+  if (p.tooShort) found.push("shorter than the minimum length");
+  if (p.tooLong) found.push(`longer than ${LIMITS.maxChars} characters`);
+  if (p.blank) found.push("blank or whitespace-only");
+  if (p.hasLeadingSpace) found.push("starts with whitespace");
+  if (p.hasTrailingSpace) found.push("ends with whitespace");
+  if (p.hasLineBreak) found.push("contains a line break");
+  if (p.hasControlChar) found.push("contains a control character");
+  if (p.hasNoLettersOrDigits) found.push("contains no letter or digit");
+  return found;
+}
 
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, "entry.txt"), ENTRY, "utf8");
+// Where the entry goes. The environment variable wins; anything else is a
+// configuration error, because writing to the wrong directory would mean
+// submitting nothing at all.
+function resolveOutputDir(): string {
+  const fromEnv = process.env.MAKEFUN_OUTPUT_DIR;
+  if (fromEnv === undefined || fromEnv === "") {
+    return DEFAULT_OUTPUT_DIR;
+  }
+  return fromEnv;
+}
+
+function main(): void {
+  const problems = describeProblems(scanEntry(JOKE));
+  if (problems.length > 0) {
+    throw new Error(
+      `invalid entry (${problems.length} problem${
+        problems.length === 1 ? "" : "s"
+      }): ${problems.join("; ")}`,
+    );
+  }
+
+  if (JOKE === PREVIOUS_JOKE) {
+    throw new Error("entry must differ from the v1 entry");
+  }
+
+  const outDir = resolveOutputDir();
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "entry.txt"), JOKE, { encoding: "utf8" });
+  console.log(`wrote entry.txt (${[...JOKE].length} chars) to ${outDir}`);
+}
+
+main();
